@@ -665,7 +665,32 @@ def admin():
 
     html="".join([f"<div class='box'><p>ID：{x[0]}</p><p>帳號：{escape(x[1])}</p><p>方案：{x[2]}</p><p>{x[3]}</p></div>" for x in users])
     return layout("Admin",f"<h1>Admin 管理台</h1><p><a href='/dashboard'>回 Dashboard</a></p><div class='card'>{html}</div>")
+import stripe
 
-if __name__=="__main__":
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+@app.route("/create-checkout/<plan>")
+def create_checkout(plan):
+
+    if plan == "pro":
+        price_id = os.getenv("STRIPE_PRO_PRICE_ID")
+    else:
+        price_id = os.getenv("STRIPE_BUSINESS_PRICE_ID")
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="subscription",
+        line_items=[
+            {
+                "price": price_id,
+                "quantity": 1,
+            }
+        ],
+        success_url="https://security-platform-e33q.onrender.com/dashboard",
+        cancel_url="https://security-platform-e33q.onrender.com/",
+    )
+
+    return redirect(session.url)
+if __name__ == "__main__":
     port=int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port)
