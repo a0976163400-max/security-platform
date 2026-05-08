@@ -1,22 +1,18 @@
 from flask import Flask, request, redirect, session
-import requests
-import socket
-import sqlite3
-import ssl
-import time
+import sqlite3, requests, socket, ssl, time, os
 from datetime import datetime
 from html import escape
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "change-this-secret-key"
-DB_NAME = "saas_security.db"
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
+DB = "security_saas_final.db"
 
 ADMIN_USER = "admin"
 ADMIN_PASS = "123456"
 
 def db():
-    return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB)
 
 def init_db():
     conn = db()
@@ -36,6 +32,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS targets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
+        name TEXT,
         url TEXT,
         note TEXT,
         created_at TEXT
@@ -43,31 +40,39 @@ def init_db():
     """)
 
     c.execute("""
-    CREATE TABLE IF NOT EXISTS history (
+    CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         url TEXT,
         ip TEXT,
-        status_code TEXT,
+        status TEXT,
         response_time TEXT,
         server TEXT,
+        ssl_expire TEXT,
+        ssl_days INTEGER,
         score INTEGER,
         risk TEXT,
         alert TEXT,
+        report TEXT,
         created_at TEXT
     )
     """)
 
-    conn.commit()
-
-    admin_hash = generate_password_hash(ADMIN_PASS)
     c.execute("""
     INSERT OR IGNORE INTO users (username, password_hash, plan, created_at)
     VALUES (?, ?, ?, ?)
-    """, (ADMIN_USER, admin_hash, "Business", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    """, (
+        ADMIN_USER,
+        generate_password_hash(ADMIN_PASS),
+        "Business",
+        now()
+    ))
 
     conn.commit()
     conn.close()
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def normalize_url(url):
     url = url.strip()
@@ -75,50 +80,48 @@ def normalize_url(url):
         url = "https://" + url
     return url
 
-def get_host(url):
+def host_from_url(url):
     return url.replace("https://", "").replace("http://", "").split("/")[0]
 
-def get_user():
-    if "user_id" not in session:
+def current_user():
+    if "uid" not in session:
         return None
     conn = db()
     c = conn.cursor()
-    c.execute("SELECT id, username, plan FROM users WHERE id=?", (session["user_id"],))
+    c.execute("SELECT id, username, plan FROM users WHERE id=?", (session["uid"],))
     row = c.fetchone()
     conn.close()
     return row
 
 def plan_limit(plan):
-    if plan == "Free":
-        return 1
-    if plan == "Pro":
-        return 5
-    return 50
+    return {"Free": 1, "Pro": 5, "Business": 50}.get(plan, 1)
 
-def ssl_info(host):
+def ssl_check(host):
     try:
         ctx = ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=3) as sock:
+        with socket.create_connection((host, 443), timeout=4) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
                 exp = cert.get("notAfter", "未知")
-                exp_ts = ssl.cert_time_to_seconds(exp)
-                days_left = int((exp_ts - time.time()) / 86400)
-                return exp, days_left
+                ts = ssl.cert_time_to_seconds(exp)
+                days = int((ts - time.time()) / 86400)
+                return exp, days
     except:
         return "查詢失敗", -1
 
-def scan_site(user_id, raw_url):
-    url = normalize_url(raw_url)
-    host = get_host(url)
+def safe_scan(user_id, url):
+    url = normalize_url(url)
+    host = host_from_url(url)
 
     start = time.time()
-    r = requests.get(url, timeout=8)
-    response_time = round(time.time() - start, 3)
+    r = requests.get(url, timeout=10, allow_redirects=True)
+    rt = round(time.time() - start, 3)
 
     headers = r.headers
     ip = socket.gethostbyname(host)
     server = headers.get("Server", "未顯示")
+
+    ssl_exp, ssl_days = ssl_check(host)
 
     score = 0
     alerts = []
@@ -130,10 +133,9 @@ def scan_site(user_id, raw_url):
     else:
         alerts.append("網站在線")
 
-    if response_time > 3:
-        alerts.append("回應時間過慢")
+    if rt > 3:
+        alerts.append("回應速度偏慢")
 
-    ssl_exp, ssl_days = ssl_info(host)
     if ssl_days != -1 and ssl_days < 30:
         alerts.append("SSL 即將到期")
 
@@ -145,56 +147,103 @@ def scan_site(user_id, raw_url):
         "Referrer-Policy": "保護來源資訊"
     }
 
-    header_html = ""
+    header_result = ""
+    report_headers = ""
+
     for h, desc in checks.items():
         if h in headers:
             score += 20
-            header_html += f"<p class='ok'>✅ {h}：有（{desc}）</p>"
+            header_result += f"<p class='ok'>✅ {h}：有（{desc}）</p>"
+            report_headers += f"✅ {h}：有（{desc}）\n"
         else:
-            header_html += f"<p class='bad'>❌ {h}：沒有（{desc}）</p>"
+            header_result += f"<p class='bad'>❌ {h}：沒有（{desc}）</p>"
+            report_headers += f"❌ {h}：沒有（{desc}）\n"
             alerts.append(f"缺少 {h}")
 
-    if score >= 80:
-        risk, risk_class = "低風險", "low"
-    elif score >= 40:
-        risk, risk_class = "中風險", "mid"
-    else:
-        risk, risk_class = "高風險", "high"
+    cookies = headers.get("Set-Cookie", "")
+    cookie_html = ""
+    cookie_report = ""
 
-    port_html = ""
-    for port in [80, 443, 8080]:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1)
-        open_port = s.connect_ex((host, port)) == 0
-        s.close()
-
-        if open_port:
-            port_html += f"<p class='ok'>🟢 Port {port} 開放</p>"
+    if cookies:
+        if "Secure" in cookies:
+            cookie_html += "<p class='ok'>✅ Cookie 有 Secure</p>"
+            cookie_report += "Cookie Secure：有\n"
         else:
-            port_html += f"<p class='bad'>🔴 Port {port} 關閉</p>"
+            cookie_html += "<p class='bad'>❌ Cookie 缺少 Secure</p>"
+            cookie_report += "Cookie Secure：沒有\n"
+
+        if "HttpOnly" in cookies:
+            cookie_html += "<p class='ok'>✅ Cookie 有 HttpOnly</p>"
+            cookie_report += "Cookie HttpOnly：有\n"
+        else:
+            cookie_html += "<p class='bad'>❌ Cookie 缺少 HttpOnly</p>"
+            cookie_report += "Cookie HttpOnly：沒有\n"
+    else:
+        cookie_html = "<p>未偵測到 Set-Cookie。</p>"
+        cookie_report = "Cookie：未偵測到 Set-Cookie\n"
+
+    if score >= 80:
+        risk = "低風險"
+        cls = "low"
+    elif score >= 40:
+        risk = "中風險"
+        cls = "mid"
+    else:
+        risk = "高風險"
+        cls = "high"
 
     alert_text = "、".join(alerts)
+
+    report = f"""網站安全健檢報告
+====================
+
+網站：{url}
+IP：{ip}
+HTTP 狀態碼：{r.status_code}
+回應時間：{rt} 秒
+Server：{server}
+SSL 到期：{ssl_exp}
+SSL 剩餘天數：{ssl_days}
+
+安全分數：{score}/100
+風險等級：{risk}
+告警：{alert_text}
+
+Security Header：
+{report_headers}
+
+Cookie：
+{cookie_report}
+
+改善建議：
+1. 補上缺少的 Security Header。
+2. 確認 SSL 憑證有效且提前續約。
+3. 檢查網站回應速度與主機穩定性。
+4. 建議啟用 Cloudflare / WAF 基礎防護。
+5. 定期產出安全健檢報告。
+"""
 
     conn = db()
     c = conn.cursor()
     c.execute("""
-    INSERT INTO history (user_id, url, ip, status_code, response_time, server, score, risk, alert, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO reports (
+        user_id, url, ip, status, response_time, server,
+        ssl_expire, ssl_days, score, risk, alert, report, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        user_id, url, ip, str(r.status_code), str(response_time),
-        server, score, risk, alert_text,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_id, url, ip, str(r.status_code), str(rt), server,
+        ssl_exp, ssl_days, score, risk, alert_text, report, now()
     ))
     conn.commit()
     conn.close()
 
     return f"""
     <div class='card'>
-        <h2>掃描結果</h2>
-        <p>網址：{escape(url)}</p>
+        <h2>健檢摘要</h2>
+        <p>網站：{escape(url)}</p>
         <p>IP：{ip}</p>
-        <p>狀態碼：{r.status_code}</p>
-        <p>回應時間：{response_time} 秒</p>
+        <p>HTTP 狀態碼：{r.status_code}</p>
+        <p>回應時間：{rt} 秒</p>
         <p>Server：{escape(server)}</p>
         <p>SSL 到期：{ssl_exp}</p>
         <p>SSL 剩餘天數：{ssl_days}</p>
@@ -203,60 +252,75 @@ def scan_site(user_id, raw_url):
     <div class='card'>
         <h2>安全分數</h2>
         <div class='score'>{score}/100</div>
-        <h1 class='{risk_class}'>風險等級：{risk}</h1>
+        <h1 class='{cls}'>風險等級：{risk}</h1>
     </div>
 
     <div class='card'>
         <h2>Security Header</h2>
-        {header_html}
+        {header_result}
     </div>
 
     <div class='card'>
-        <h2>Port 監控</h2>
-        {port_html}
+        <h2>Cookie 安全</h2>
+        {cookie_html}
     </div>
 
     <div class='card'>
         <h2>AI 防禦建議</h2>
         <p>告警：{escape(alert_text)}</p>
-        <p>建議：補強缺少的 Security Header，定期檢查 SSL 與網站可用性。</p>
+        <p>建議：優先補強缺少的 Header、監控 SSL、確認網站穩定性。</p>
+    </div>
+
+    <div class='card'>
+        <h2>客戶報告</h2>
+        <textarea id="report">{escape(report)}</textarea>
+        <button onclick="copyReport()">一鍵複製報告</button>
     </div>
     """
 
-def page(title, body):
+def layout(title, body):
     return f"""
     <html>
     <head>
         <title>{title}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script>
+        function copyReport() {{
+            var r = document.getElementById("report");
+            r.select();
+            document.execCommand("copy");
+            alert("報告已複製");
+        }}
+        </script>
         <style>
             body {{
                 background:#020617;
                 color:#e5e7eb;
                 font-family:Arial, sans-serif;
-                padding:24px;
+                padding:26px;
                 font-size:18px;
             }}
-            h1 {{ font-size:34px; }}
+            h1 {{ font-size:36px; }}
+            h2 {{ font-size:26px; }}
             input, select {{
-                width:90%;
+                width:92%;
                 padding:15px;
                 border-radius:12px;
                 border:0;
                 font-size:18px;
-                margin-top:8px;
+                margin-top:10px;
             }}
             button {{
-                padding:15px 20px;
-                border-radius:12px;
+                padding:15px 22px;
                 border:0;
+                border-radius:12px;
                 background:#22c55e;
                 font-weight:bold;
                 font-size:18px;
+                margin-top:12px;
                 box-shadow:0 0 18px #22c55e66;
-                margin-top:10px;
             }}
-            a {{ color:#38bdf8; }}
+            a {{ color:#38bdf8; text-decoration:none; }}
             .danger {{
                 background:#ef4444;
                 color:white;
@@ -266,19 +330,31 @@ def page(title, body):
                 background:#0f172a;
                 border:1px solid #1e293b;
                 border-radius:18px;
-                padding:22px;
+                padding:24px;
                 margin-top:22px;
             }}
-            .history {{
+            .box {{
                 background:#111827;
                 border:1px solid #334155;
                 border-radius:14px;
-                padding:14px;
+                padding:15px;
                 margin-top:12px;
             }}
+            .grid {{
+                display:grid;
+                grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+                gap:18px;
+            }}
             .score {{
-                font-size:42px;
+                font-size:46px;
                 font-weight:bold;
+            }}
+            textarea {{
+                width:100%;
+                height:300px;
+                border-radius:12px;
+                padding:14px;
+                font-size:16px;
             }}
             .ok {{ color:#22c55e; }}
             .bad {{ color:#fb7185; }}
@@ -287,41 +363,71 @@ def page(title, body):
             .high {{ color:#ef4444; }}
         </style>
     </head>
-    <body>
-        {body}
-    </body>
+    <body>{body}</body>
     </html>
     """
 
 init_db()
 
 @app.route("/")
-def index():
-    user = get_user()
-    if user:
+def home():
+    if current_user():
         return redirect("/dashboard")
 
     body = """
-    <h1>🛡️ Security SaaS 防禦監控平台</h1>
+    <h1>🛡️ Security SaaS 網站防禦健檢平台</h1>
+
     <div class='card'>
-        <h2>網站安全監控 SaaS</h2>
-        <p>提供網站健檢、SSL 監控、Header 檢查、Port 監控、風險分數與歷史紀錄。</p>
-        <p><b>Free：</b>1 個網站</p>
-        <p><b>Pro：</b>5 個網站</p>
-        <p><b>Business：</b>50 個網站</p>
+        <h2>幫客戶檢查網站安全、SSL、Header、Cookie、回應速度與風險分數</h2>
+        <p>適合接案、網站維護、企業形象站、WordPress、電商網站、個人品牌網站。</p>
+        <a href='/register'><button>免費註冊</button></a>
         <a href='/login'><button>登入</button></a>
-        <a href='/register'><button>註冊</button></a>
+    </div>
+
+    <div class='card'>
+        <h2>方案價格</h2>
+        <div class='grid'>
+            <div class='box'>
+                <h2>Free</h2>
+                <p>1 個網站</p>
+                <p>基本健檢</p>
+                <h2>NT$0</h2>
+            </div>
+            <div class='box'>
+                <h2>Pro</h2>
+                <p>5 個網站</p>
+                <p>歷史紀錄 / 報告</p>
+                <h2>NT$299/月</h2>
+            </div>
+            <div class='box'>
+                <h2>Business</h2>
+                <p>50 個網站</p>
+                <p>客戶監控 / 接案展示</p>
+                <h2>NT$999/月</h2>
+            </div>
+        </div>
+    </div>
+
+    <div class='card'>
+        <h2>功能</h2>
+        <p>✅ SSL 檢查</p>
+        <p>✅ Security Header 檢查</p>
+        <p>✅ Cookie 安全檢查</p>
+        <p>✅ 回應速度檢查</p>
+        <p>✅ 風險分數</p>
+        <p>✅ 客戶報告複製</p>
+        <p>✅ 會員 Dashboard</p>
     </div>
     """
-    return page("Security SaaS", body)
+    return layout("Security SaaS", body)
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
     msg = ""
     if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
-        plan = request.form.get("plan")
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        plan = request.form.get("plan", "Free")
 
         try:
             conn = db()
@@ -329,20 +435,15 @@ def register():
             c.execute("""
             INSERT INTO users (username, password_hash, plan, created_at)
             VALUES (?, ?, ?, ?)
-            """, (
-                username,
-                generate_password_hash(password),
-                plan,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ))
+            """, (username, generate_password_hash(password), plan, now()))
             conn.commit()
             conn.close()
             return redirect("/login")
         except Exception as e:
-            msg = f"<p class='bad'>註冊失敗：{e}</p>"
+            msg = f"<p class='bad'>註冊失敗：{escape(str(e))}</p>"
 
     body = f"""
-    <h1>註冊帳號</h1>
+    <h1>註冊</h1>
     <div class='card'>
         {msg}
         <form method="POST">
@@ -353,31 +454,30 @@ def register():
                 <option value="Pro">Pro - 5 個網站</option>
                 <option value="Business">Business - 50 個網站</option>
             </select>
-            <button type="submit">註冊</button>
+            <button>建立帳號</button>
         </form>
-        <p><a href="/login">已有帳號？登入</a></p>
+        <p><a href='/login'>已有帳號？登入</a></p>
     </div>
     """
-    return page("註冊", body)
+    return layout("註冊", body)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     msg = ""
     if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
 
         conn = db()
         c = conn.cursor()
-        c.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,))
+        c.execute("SELECT id, password_hash FROM users WHERE username=?", (username,))
         row = c.fetchone()
         conn.close()
 
-        if row and check_password_hash(row[2], password):
-            session["user_id"] = row[0]
+        if row and check_password_hash(row[1], password):
+            session["uid"] = row[0]
             return redirect("/dashboard")
-        else:
-            msg = "<p class='bad'>帳號或密碼錯誤</p>"
+        msg = "<p class='bad'>帳號或密碼錯誤</p>"
 
     body = f"""
     <h1>登入</h1>
@@ -386,12 +486,12 @@ def login():
         <form method="POST">
             <input name="username" placeholder="帳號">
             <input name="password" type="password" placeholder="密碼">
-            <button type="submit">登入</button>
+            <button>登入</button>
         </form>
         <p>預設管理員：admin / 123456</p>
     </div>
     """
-    return page("登入", body)
+    return layout("登入", body)
 
 @app.route("/logout")
 def logout():
@@ -400,74 +500,76 @@ def logout():
 
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
-    user = get_user()
-    if not user:
+    u = current_user()
+    if not u:
         return redirect("/login")
 
-    user_id, username, plan = user
+    uid, username, plan = u
     limit = plan_limit(plan)
     result = ""
 
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM targets WHERE user_id=?", (user_id,))
-    count = c.fetchone()[0]
-    conn.close()
-
-    if request.method == "POST" and request.form.get("target"):
-        if count >= limit:
-            result = "<div class='card bad'>已達目前方案可新增網站數量上限</div>"
-        else:
-            target = normalize_url(request.form.get("target"))
-            note = request.form.get("note", "")
-
-            conn = db()
-            c = conn.cursor()
-            c.execute("""
-            INSERT INTO targets (user_id, url, note, created_at)
-            VALUES (?, ?, ?, ?)
-            """, (user_id, target, note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            conn.commit()
-            conn.close()
-            return redirect("/dashboard")
-
     if request.method == "POST" and request.form.get("scan_url"):
         try:
-            result = scan_site(user_id, request.form.get("scan_url"))
+            result = safe_scan(uid, request.form.get("scan_url"))
         except Exception as e:
-            result = f"<div class='card bad'>掃描失敗：{e}</div>"
+            result = f"<div class='card bad'>掃描失敗：{escape(str(e))}</div>"
+
+    if request.method == "POST" and request.form.get("target_url"):
+        conn = db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM targets WHERE user_id=?", (uid,))
+        count = c.fetchone()[0]
+
+        if count >= limit:
+            result = "<div class='card bad'>已達目前方案網站數量上限</div>"
+        else:
+            c.execute("""
+            INSERT INTO targets (user_id, name, url, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """, (
+                uid,
+                request.form.get("target_name", "未命名"),
+                normalize_url(request.form.get("target_url")),
+                request.form.get("note", ""),
+                now()
+            ))
+            conn.commit()
+            result = "<div class='card ok'>已新增監控網站</div>"
+        conn.close()
 
     conn = db()
     c = conn.cursor()
-    c.execute("SELECT id, url, note, created_at FROM targets WHERE user_id=? ORDER BY id DESC", (user_id,))
+
+    c.execute("SELECT id, name, url, note, created_at FROM targets WHERE user_id=? ORDER BY id DESC", (uid,))
     targets = c.fetchall()
 
     c.execute("""
-    SELECT url, ip, status_code, response_time, server, score, risk, alert, created_at
-    FROM history WHERE user_id=? ORDER BY id DESC LIMIT 10
-    """, (user_id,))
-    history = c.fetchall()
+    SELECT url, ip, status, response_time, server, score, risk, alert, created_at
+    FROM reports WHERE user_id=? ORDER BY id DESC LIMIT 10
+    """, (uid,))
+    reports = c.fetchall()
+
     conn.close()
 
     targets_html = ""
-    for tid, url, note, created in targets:
+    for tid, name, url, note, created in targets:
         targets_html += f"""
-        <div class='history'>
-            <p><b>{escape(url)}</b></p>
-            <p>備註：{escape(note)}</p>
-            <p>加入：{created}</p>
+        <div class='box'>
+            <p><b>{escape(name)}</b></p>
+            <p>{escape(url)}</p>
+            <p>{escape(note)}</p>
             <form method="POST">
                 <input type="hidden" name="scan_url" value="{escape(url)}">
-                <button type="submit">掃描此網站</button>
+                <button>掃描此網站</button>
             </form>
         </div>
         """
 
-    history_html = ""
-    for row in history:
-        url, ip, status, rt, server, score, risk, alert, created = row
-        history_html += f"""
-        <div class='history'>
+    reports_html = ""
+    for r in reports:
+        url, ip, status, rt, server, score, risk, alert, created = r
+        reports_html += f"""
+        <div class='box'>
             <p><b>{escape(url)}</b></p>
             <p>IP：{ip}</p>
             <p>狀態碼：{status}｜回應：{rt} 秒</p>
@@ -484,19 +586,20 @@ def dashboard():
     <p><a href="/logout">登出</a></p>
 
     <div class='card'>
-        <h2>新增監控網站</h2>
+        <h2>單次網站健檢</h2>
         <form method="POST">
-            <input name="target" placeholder="網站，例如 example.com">
-            <input name="note" placeholder="備註">
-            <button type="submit">新增</button>
+            <input name="scan_url" placeholder="輸入網站，例如 example.com">
+            <button>開始健檢</button>
         </form>
     </div>
 
     <div class='card'>
-        <h2>單次掃描</h2>
+        <h2>新增客戶網站</h2>
         <form method="POST">
-            <input name="scan_url" placeholder="輸入網站，例如 google.com">
-            <button type="submit">開始掃描</button>
+            <input name="target_name" placeholder="客戶名稱 / 網站名稱">
+            <input name="target_url" placeholder="網站，例如 example.com">
+            <input name="note" placeholder="備註">
+            <button>新增</button>
         </form>
     </div>
 
@@ -508,11 +611,52 @@ def dashboard():
     </div>
 
     <div class='card'>
-        <h2>最近掃描紀錄</h2>
-        {history_html if history_html else "<p>目前沒有紀錄。</p>"}
+        <h2>最近健檢紀錄</h2>
+        {reports_html if reports_html else "<p>目前沒有紀錄。</p>"}
     </div>
     """
 
-    return page("Dashboard", body)
+    return layout("Dashboard", body)
 
-app.run(host="0.0.0.0", port=5000)
+@app.route("/admin")
+def admin():
+    u = current_user()
+    if not u:
+        return redirect("/login")
+
+    uid, username, plan = u
+    if username != ADMIN_USER:
+        return redirect("/dashboard")
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT id, username, plan, created_at FROM users ORDER BY id DESC")
+    users = c.fetchall()
+    conn.close()
+
+    html = ""
+    for user in users:
+        i, name, p, t = user
+        html += f"""
+        <div class='box'>
+            <p>ID：{i}</p>
+            <p>帳號：{escape(name)}</p>
+            <p>方案：{p}</p>
+            <p>建立：{t}</p>
+        </div>
+        """
+
+    body = f"""
+    <h1>Admin 管理台</h1>
+    <p><a href="/dashboard">回 Dashboard</a></p>
+    <div class='card'>
+        <h2>會員列表</h2>
+        {html}
+    </div>
+    """
+
+    return layout("Admin", body)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
