@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI詐騙對話分析器</title>
+    <style>
+        body {
+            font-family: Arial, "Microsoft JhengHei";
+            background: #f4f4f4;
+            padding: 40px;
+        }
+        .box {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+        }
+        textarea {
+            width: 100%;
+            height: 180px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 24px;
+            background: #e63946;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin-top: 12px;
+            font-size: 16px;
+        }
+        table {
+            width: 100%;
+            margin-top: 25px;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+        }
+        th {
+            background: #222;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+<div class="box">
+    <h1>🔐 AI詐騙對話分析器</h1>
+    <p>把 LINE 對話整段貼上，每一行會分別分析。</p>
+
+    <form method="post">
+        <textarea name="message" placeholder="例如：
+對方：我現在急需用錢
+對方：你先幫我匯款
+你：多少
+對方：不要告訴別人"></textarea>
+        <br>
+        <button type="submit">開始分析整段對話</button>
+    </form>
+
+    {% if results %}
+    <table>
+        <tr>
+            <th>對話內容</th>
+            <th>風險</th>
+            <th>分數</th>
+            <th>可疑關鍵字</th>
+        </tr>
+        {% for r in results %}
+<tr
+{% if "高風險" in r.level %}
+    style="background-color:#ffcccc;"
+{% elif "中風險" in r.level %}
+    style="background-color:#fff3cd;"
+{% else %}
+    style="background-color:#d4edda;"
+{% endif %}
+>
+   <td>
+{% if "高風險" in r.level %}
+    <b style="color:red;">{{ r.text }}</b>
+{% elif "中風險" in r.level %}
+    <b style="color:#856404;">{{ r.text }}</b>
+{% else %}
+    {{ r.text }}
+{% endif %}
+</td>
+    <td>{{ r.level }}</td>
+    <td>{{ r.score }}</td>
+    <td>{{ r.keywords }}</td>
+</tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+</body>
+</html>
