@@ -686,29 +686,27 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 @app.route("/create-checkout/<plan>")
 def create_checkout(plan):
-
-
     if plan == "pro":
         price_id = os.getenv("STRIPE_PRO_PRICE_ID")
     else:
         price_id = os.getenv("STRIPE_BUSINESS_PRICE_ID")
 
-session = stripe.checkout.Session.create(
-    payment_method_types=["card"],
-    mode="subscription",
-    line_items=[
-        {
-            "price": price_id,
-            "quantity": 1,
-        }
-    ],
-    client_reference_id=session.get("user_id"),
-    metadata={"plan": plan},
-    success_url="https://security-platform-e33q.onrender.com/dashboard",
-    cancel_url="https://security-platform-e33q.onrender.com/",
-)
+    checkout_session = stripe.checkout.Session.create(       
+        payment_method_types=["card"],
+        mode="subscription",
+        line_items=[
+            {
+                "price": price_id,
+                "quantity": 1,
+            }
+        ],
+        client_reference_id=session.get("user_id"),
+        metadata={"plan": plan},
+        success_url="https://security-platform-e33q.onrender.com/dashboard",
+        cancel_url="https://security-platform-e33q.onrender.com/",
+    )
 
-    return redirect(session.url)
+    return redirect(checkout_session.url)
 @app.route("/webhook", methods=["POST"])
 def stripe_webhook():
     payload = request.data
