@@ -709,7 +709,40 @@ metadata={"plan": plan}
     )
 
     return redirect(session.url)
+@app.route("/webhook", methods=["POST"])
+def stripe_webhook():
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
+    try:
+        event = stripe.Webhook.construct_event(
+            payload,
+            sig_header,
+            endpoint_secret
+        )
+    except Exception as e:
+        return str(e), 400
+
+    if event["type"] == "checkout.session.completed":
+        checkout_session = event["data"]["object"]
+
+        user_id = checkout_session.get("client_reference_id")
+        plan = checkout_session.get("metadata", {}).get("plan", "Free")
+
+        if user_id:
+            conn = db()
+            c = conn.cursor()
+
+            c.execute(
+                "UPDATE users SET plan=? WHERE id=?",
+                (plan.capitalize(), user_id)
+            )
+
+            conn.commit()
+            conn.close()
+
+    return "ok", 200
 if __name__ == "__main__":
     port=int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port)
