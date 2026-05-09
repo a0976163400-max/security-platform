@@ -398,8 +398,23 @@ def home():
         <h2>方案價格</h2>
         <div class='grid'>
             <div class='box'><h2>Free</h2><p>1 個網站</p><h2>NT$0</h2></div>
-            <div class='box'><h2>Pro</h2><p>5 個網站</p><h2>NT$299/月</h2></div>
-            <div class='box'><h2>Business</h2><p>50 個網站</p><h2>NT$999/月</h2></div>
+            <div class='box'>
+<h2>Pro</h2>
+<p>5 個網站</p>
+<h2>NT$299/月</h2>
+<a href="/create-checkout/pro">
+<button>立即訂閱</button>
+</a>
+</div>
+
+<div class='box'>
+<h2>Business</h2>
+<p>50 個網站</p>
+<h2>NT$999/月</h2>
+<a href="/create-checkout/business">
+<button>立即訂閱</button>
+</a>
+</div>
         </div>
     </div>
 
