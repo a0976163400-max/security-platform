@@ -686,6 +686,8 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 @app.route("/create-checkout/<plan>")
 def create_checkout(plan):
+client_reference_id=session.get("user_id")
+metadata={"plan": plan}
 
     if plan == "pro":
         price_id = os.getenv("STRIPE_PRO_PRICE_ID")
