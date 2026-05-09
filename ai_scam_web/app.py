@@ -693,20 +693,20 @@ def create_checkout(plan):
     else:
         price_id = os.getenv("STRIPE_BUSINESS_PRICE_ID")
 
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        mode="subscription",
-        line_items=[
+session = stripe.checkout.Session.create(
+    payment_method_types=["card"],
+    mode="subscription",
+    line_items=[
+        {
+            "price": price_id,
+            "quantity": 1,
+        }
+    ],
     client_reference_id=session.get("user_id"),
-metadata={"plan": plan}
-            {
-                "price": price_id,
-                "quantity": 1,
-            }
-        ],
-        success_url="https://security-platform-e33q.onrender.com/dashboard",
-        cancel_url="https://security-platform-e33q.onrender.com/",
-    )
+    metadata={"plan": plan},
+    success_url="https://security-platform-e33q.onrender.com/dashboard",
+    cancel_url="https://security-platform-e33q.onrender.com/",
+)
 
     return redirect(session.url)
 @app.route("/webhook", methods=["POST"])
