@@ -686,12 +686,19 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 @app.route("/create-checkout/<plan>")
 def create_checkout(plan):
+    if "user_id" not in session:
+        return redirect("/login")
+
     if plan == "pro":
         price_id = os.getenv("STRIPE_PRO_PRICE_ID")
-    else:
+        plan_name = "Pro"
+    elif plan == "business":
         price_id = os.getenv("STRIPE_BUSINESS_PRICE_ID")
+        plan_name = "Business"
+    else:
+        return "Invalid plan", 400
 
-    checkout_session = stripe.checkout.Session.create(       
+    checkout_session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         mode="subscription",
         line_items=[
@@ -700,13 +707,18 @@ def create_checkout(plan):
                 "quantity": 1,
             }
         ],
-        client_reference_id=session.get("user_id"),
-        metadata={"plan": plan},
+        client_reference_id=str(session.get("user_id")),
+        metadata={
+            "user_id": str(session.get("user_id")),
+            "plan": plan_name,
+        },
         success_url="https://security-platform-e33q.onrender.com/dashboard",
         cancel_url="https://security-platform-e33q.onrender.com/",
     )
 
     return redirect(checkout_session.url)
+
+
 @app.route("/webhook", methods=["POST"])
 def stripe_webhook():
     payload = request.data
@@ -728,19 +740,19 @@ def stripe_webhook():
         user_id = checkout_session.get("client_reference_id")
         plan = checkout_session.get("metadata", {}).get("plan", "Free")
 
-        if user_id:
+        if user_id and plan in ["Pro", "Business"]:
             conn = db()
             c = conn.cursor()
-
             c.execute(
                 "UPDATE users SET plan=? WHERE id=?",
-                (plan.capitalize(), user_id)
+                (plan, user_id)
             )
-
             conn.commit()
             conn.close()
 
     return "ok", 200
+
+
 if __name__ == "__main__":
     port=int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port)
