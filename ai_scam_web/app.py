@@ -7,6 +7,7 @@ import time
 import csv
 import io
 import secrets
+import stripe
 from datetime import datetime
 from html import escape as html_escape
 from urllib.parse import urlparse
@@ -20,6 +21,8 @@ except Exception:
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
+
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
 DB = os.environ.get("DB_PATH", "business_saas.db")
 
@@ -541,257 +544,43 @@ def logout():
 
 @app.route("/create-checkout/<plan>")
 def create_checkout(plan):
-    if not require_login():
+    if "user_id" not in session:
         return redirect("/login")
 
     plan = plan.lower().strip()
 
     if plan == "pro":
-        checkout_url = os.environ.get("STRIPE_PRO_LINK", "").strip()
+        price_id = os.environ.get("STRIPE_PRO_PRICE_ID")
     elif plan == "business":
-        checkout_url = os.environ.get("STRIPE_BUSINESS_LINK", "").strip()
+        price_id = os.environ.get("STRIPE_BUSINESS_PRICE_ID")
     else:
-        return layout("方案不存在", """
-        <h1>方案不存在</h1>
-        <div class="card">
-            <p class="danger">只能使用 pro 或 business。</p>
-            <a class="btn" href="/">回首頁</a>
-        </div>
-        """), 404
+        return "方案不存在", 404
 
-    if not checkout_url:
-        content = f"""
-        <h1>Stripe 尚未設定</h1>
-        <div class="card">
-            <p>目前方案：{esc(plan)}</p>
-            <p>請到 Render 的 Environment 設定以下變數：</p>
-            <pre>STRIPE_PRO_LINK=https://buy.stripe.com/你的Pro付款連結
-STRIPE_BUSINESS_LINK=https://buy.stripe.com/你的Business付款連結</pre>
-            <p>設定完成後，重新部署，再按一次立即訂閱。</p>
-            <a class="btn" href="/">回首頁</a>
-        </div>
-        """
-        return layout("Stripe 尚未設定", content), 500
+    if not stripe.api_key:
+        return "Stripe Secret Key 尚未設定：請到 Render 環境變數確認 STRIPE_SECRET_KEY", 500
 
-    return redirect(checkout_url)
+    if not price_id:
+        return f"Stripe Price ID 尚未設定：請到 Render 環境變數確認 {plan} 的 PRICE_ID", 500
 
+    domain = request.host_url.rstrip("/")
 
-# =========================
-# 掃描功能
-# =========================
-
-def normalize_url(raw_url):
-    raw_url = (raw_url or "").strip()
-
-    if not raw_url:
-        return None
-
-    if not raw_url.startswith("http://") and not raw_url.startswith("https://"):
-        raw_url = "https://" + raw_url
-
-    parsed = urlparse(raw_url)
-
-    if parsed.scheme not in ["http", "https"]:
-        return None
-
-    if not parsed.netloc:
-        return None
-
-    return raw_url
-
-
-def get_ssl_info(hostname):
-    try:
-        context = ssl.create_default_context()
-        with socket.create_connection((hostname, 443), timeout=6) as sock:
-            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
-                expire_text = cert.get("notAfter", "")
-                expire_date = datetime.strptime(expire_text, "%b %d %H:%M:%S %Y %Z")
-                days = (expire_date - datetime.utcnow()).days
-                return expire_text, days
-    except Exception:
-        return "無法取得", 0
-
-
-def scan_site(raw_url):
-    if requests is None:
-        return {
-            "website_name": "未知",
-            "url": raw_url,
-            "ip": "無法取得",
-            "status": "requests 套件不存在",
-            "response_time": "0",
-            "server": "無法取得",
-            "ssl_expire": "無法取得",
-            "ssl_days": 0,
-            "score": 0,
-            "risk": "高風險",
-            "alert": "伺服器缺少 requests 套件，請確認 requirements.txt 有 requests。",
-            "report": "掃描失敗：缺少 requests 套件。"
-        }
-
-    url = normalize_url(raw_url)
-    if not url:
-        return {
-            "website_name": "網址錯誤",
-            "url": raw_url,
-            "ip": "無法取得",
-            "status": "網址格式錯誤",
-            "response_time": "0",
-            "server": "無法取得",
-            "ssl_expire": "無法取得",
-            "ssl_days": 0,
-            "score": 0,
-            "risk": "高風險",
-            "alert": "網址格式錯誤。",
-            "report": "請輸入正確網址，例如 https://google.com"
-        }
-
-    parsed = urlparse(url)
-    hostname = parsed.hostname or ""
-    website_name = hostname.replace("www.", "")
-
-    ip = "無法取得"
-    try:
-        ip = socket.gethostbyname(hostname)
-    except Exception:
-        pass
-
-    score = 100
-    alerts = []
-    report_lines = []
-
-    status = "無法取得"
-    response_time = "0"
-    server = "無法取得"
-    headers = {}
-    set_cookie = ""
-
-    start = time.time()
-
-    try:
-        r = requests.get(
-            url,
-            timeout=10,
-            allow_redirects=True,
-            headers={
-                "User-Agent": "SecuritySaaSScanner/1.0"
+    checkout_session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[
+            {
+                "price": price_id,
+                "quantity": 1,
             }
-        )
-        response_time = round(time.time() - start, 2)
-        status = r.status_code
-        headers = r.headers
-        server = headers.get("Server", "未公開")
-        set_cookie = headers.get("Set-Cookie", "")
+        ],
+        success_url=domain + "/dashboard?payment=success",
+        cancel_url=domain + "/?payment=cancel",
+        metadata={
+            "user_id": str(session.get("user_id")),
+            "plan": plan,
+        },
+    )
 
-        if status >= 500:
-            score -= 25
-            alerts.append("網站出現 5xx 伺服器錯誤。")
-        elif status >= 400:
-            score -= 15
-            alerts.append("網站出現 4xx 錯誤。")
-
-        if response_time > 3:
-            score -= 10
-            alerts.append("網站回應速度偏慢。")
-
-    except Exception as e:
-        score -= 35
-        alerts.append("網站無法正常連線。")
-        status = f"連線失敗：{e}"
-        response_time = round(time.time() - start, 2)
-
-    ssl_expire = "無 SSL"
-    ssl_days = 0
-
-    if parsed.scheme == "https":
-        ssl_expire, ssl_days = get_ssl_info(hostname)
-
-        if ssl_days <= 0:
-            score -= 25
-            alerts.append("SSL 憑證無法取得或已過期。")
-        elif ssl_days < 15:
-            score -= 20
-            alerts.append("SSL 憑證即將到期。")
-        elif ssl_days < 30:
-            score -= 10
-            alerts.append("SSL 憑證剩餘天數偏低。")
-    else:
-        score -= 25
-        alerts.append("網站沒有使用 HTTPS。")
-
-    required_headers = [
-        "Strict-Transport-Security",
-        "Content-Security-Policy",
-        "X-Frame-Options",
-        "X-Content-Type-Options",
-        "Referrer-Policy"
-    ]
-
-    missing_headers = []
-    for h in required_headers:
-        if h not in headers:
-            missing_headers.append(h)
-
-    if missing_headers:
-        score -= min(25, len(missing_headers) * 5)
-        alerts.append("缺少安全 Header：" + ", ".join(missing_headers))
-
-    if set_cookie:
-        cookie_lower = set_cookie.lower()
-        if "httponly" not in cookie_lower:
-            score -= 5
-            alerts.append("Cookie 缺少 HttpOnly。")
-        if "secure" not in cookie_lower and parsed.scheme == "https":
-            score -= 5
-            alerts.append("Cookie 缺少 Secure。")
-        if "samesite" not in cookie_lower:
-            score -= 5
-            alerts.append("Cookie 缺少 SameSite。")
-
-    if score < 0:
-        score = 0
-
-    if score >= 80:
-        risk = "低風險"
-    elif score >= 60:
-        risk = "中風險"
-    else:
-        risk = "高風險"
-
-    if not alerts:
-        alerts.append("目前未發現重大明顯風險。")
-
-    report_lines.append("網站安全檢測完成")
-    report_lines.append(f"網址：{url}")
-    report_lines.append(f"IP：{ip}")
-    report_lines.append(f"HTTP 狀態碼：{status}")
-    report_lines.append(f"回應時間：{response_time} 秒")
-    report_lines.append(f"Server：{server}")
-    report_lines.append(f"SSL 到期：{ssl_expire}")
-    report_lines.append(f"SSL 剩餘天數：{ssl_days}")
-    report_lines.append(f"安全分數：{score}/100")
-    report_lines.append(f"風險等級：{risk}")
-    report_lines.append("")
-    report_lines.append("AI 風險建議：")
-    for a in alerts:
-        report_lines.append(f"- {a}")
-
-    return {
-        "website_name": website_name,
-        "url": url,
-        "ip": ip,
-        "status": status,
-        "response_time": response_time,
-        "server": server,
-        "ssl_expire": ssl_expire,
-        "ssl_days": ssl_days,
-        "score": score,
-        "risk": risk,
-        "alert": "\n".join(alerts),
-        "report": "\n".join(report_lines)
-    }
+    return redirect(checkout_session.url, code=303)
 
 
 @app.route("/scan", methods=["POST"])
