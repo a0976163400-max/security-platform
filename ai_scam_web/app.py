@@ -1,4 +1,5 @@
 from flask import Flask, request, redirect, session, Response, jsonify
+from markupsafe import escape
 import sqlite3
 import os
 import socket
