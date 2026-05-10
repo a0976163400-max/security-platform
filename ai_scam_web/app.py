@@ -649,91 +649,104 @@ def scan():
 
 @app.route("/dashboard")
 def dashboard():
-    if not require_login():
+    user = current_user()
+
+    if not user:
         return redirect("/login")
 
-    user = current_user()
     uid = user["id"]
-    limit = plan_limit(user["plan"])
+    username = user["username"]
+    plan = user["plan"] or "Free"
+    api_key = user["api_key"] or ""
+    expire_date = user["expire_date"] or ""
+
+    limit = plan_limit(plan)
 
     conn = db()
     c = conn.cursor()
-    c.execute("""
-    SELECT * FROM reports
-    WHERE user_id = ?
-    ORDER BY id DESC
-    """, (uid,))
-    reports = c.fetchall()
 
+    c.execute(
+        """
+        SELECT website_name, url, ip, status, response_time, server,
+               ssl_expire, ssl_days, score, risk, alert, report, created_at
+        FROM reports
+        WHERE user_id=?
+        ORDER BY id DESC
+        """,
+        (uid,)
+    )
+    reports = c.fetchall()
     conn.close()
 
-    result_html = ""
+    cards = ""
 
-    if not reports:
-        result_html = "<p>目前還沒有掃描結果。</p>"
-    else:
+    if reports:
         for r in reports:
-            risk_class = "good"
-            if r["risk"] == "中風險":
-                risk_class = "warn"
-            if r["risk"] == "高風險":
-                risk_class = "danger"
+            website_name = r["website_name"] or "-"
+            url = r["url"] or "-"
+            ip = r["ip"] or "-"
+            status = r["status"] or "-"
+            response_time = r["response_time"] or "-"
+            server = r["server"] or "-"
+            ssl_expire = r["ssl_expire"] or "-"
+            ssl_days = r["ssl_days"] or "-"
+            score = r["score"] or 0
+            risk = r["risk"] or "-"
+            alert = r["alert"] or "-"
+            report = r["report"] or "-"
 
-            result_html += f"""
-            <div class="box">
-                <h2>{esc(r["website_name"])}</h2>
-                <p>網址：{esc(r["url"])}</p>
-                <p>IP：{esc(r["ip"])}</p>
-                <p>HTTP 狀態碼：{esc(r["status"])}</p>
-                <p>回應時間：{esc(r["response_time"])} 秒</p>
-                <p>Server：{esc(r["server"])}</p>
-                <p>SSL 到期：{esc(r["ssl_expire"])}</p>
-                <p>SSL 剩餘天數：{esc(r["ssl_days"])}</p>
+            cards += f"""
+            <div class="card result-card">
+                <h2>{escape(str(website_name))}</h2>
+                <p>網址：{escape(str(url))}</p>
+                <p>IP：{escape(str(ip))}</p>
+                <p>HTTP 狀態碼：{escape(str(status))}</p>
+                <p>回應時間：{escape(str(response_time))} 秒</p>
+                <p>Server：{escape(str(server))}</p>
+                <p>SSL 到期：{escape(str(ssl_expire))}</p>
+                <p>SSL 剩餘天數：{escape(str(ssl_days))}</p>
 
-                <h3>安全分數</h3>
-                <p>分數：{esc(r["score"])}/100</p>
-                <p>風險等級：<span class="{risk_class}">{esc(r["risk"])}</span></p>
+                <h2>安全分數</h2>
+                <p>分數：{escape(str(score))}/100</p>
+                <p>風險等級：{escape(str(risk))}</p>
 
-                <h3>AI 風險建議</h3>
-                <pre>{esc(r["alert"])}</pre>
+                <h2>AI 風險建議</h2>
+                <pre>{escape(str(alert))}</pre>
 
-                <h3>完整報告文字</h3>
-                <pre>{esc(r["report"])}</pre>
+                <h2>完整報告文字</h2>
+                <pre>{escape(str(report))}</pre>
             </div>
             """
+    else:
+        cards = "<p>目前還沒有掃描結果。</p>"
 
-    content = f"""
+    html = f"""
     <h1>Dashboard</h1>
 
     <div class="card">
         <h2>新增掃描</h2>
-        <form method="post" action="/scan">
-            <input name="url" placeholder="輸入網址，例如 https://google.com">
+        <form method="POST" action="/scan" class="scan-form">
+            <input type="text" name="url" placeholder="輸入網址，例如 https://google.com" required>
             <button type="submit">開始掃描</button>
         </form>
     </div>
 
     <div class="card">
         <h2>帳號資訊</h2>
-        <p>帳號：{esc(user["username"])}</p>
-        <p>方案：{esc(user["plan"])}</p>
-        <p>網站上限：{limit}</p>
-        <p>到期日：{esc(user["expire_date"])}</p>
-        <p>API Key：{esc(user["api_key"])}</p>
+        <p>帳號：{escape(str(username))}</p>
+        <p>方案：{escape(str(plan))}</p>
+        <p>網站上限：{escape(str(limit))}</p>
+        <p>到期日：{escape(str(expire_date))}</p>
+        <p>API Key：{escape(str(api_key))}</p>
     </div>
 
     <div class="card">
         <h2>掃描結果</h2>
-        {result_html}
+        {cards}
     </div>
     """
 
-    return layout("Dashboard", content)
-
-
-# =========================
-# CSV 匯出
-# =========================
+    return layout("Dashboard", html)
 
 @app.route("/export")
 def export_csv():
