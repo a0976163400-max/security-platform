@@ -22,8 +22,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 
 DB = "business_saas.db"
 
-ADMIN_USER = "admin"
-ADMIN_PASS = "123456"
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "123456")
 
 
 # =========================
@@ -576,8 +576,7 @@ def login():
             <input name="password" type="password">
             <br><br>
             <button type="submit">登入</button>
-        </form>
-        <p>測試管理員：admin / 123456</p>
+        </form>      
     </div>
     """
     return layout("登入", body)
